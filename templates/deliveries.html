@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .panel-card { background-color: #27272A; border: 1px solid #3F3F46; border-radius: 12px; padding: 24px; }
+    .dark-input { background-color: #18181B; border: 1px solid #3F3F46; color: #F4F4F5; border-radius: 8px; padding: 10px 14px; transition: all 0.2s; }
+    .dark-input:focus { border-color: #A78BFA; box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2); outline: none; }
+    .custom-table { width: 100%; color: #F4F4F5; font-size: 0.9rem; }
+    .custom-table th { color: #A1A1AA; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; border-bottom: 1px solid #3F3F46; padding-bottom: 12px; font-weight: 600; }
+    .custom-table td { padding: 16px 0; border-bottom: 1px solid #3F3F46; vertical-align: middle; }
+    .btn-purple { background-color: #6D28D9; color: white; border: none; border-radius: 8px; padding: 10px 24px; font-weight: 600; transition: all 0.2s; }
+    .btn-purple:hover { background-color: #5B21B6; }
+    .btn-outline-purple { background: transparent; border: 1px solid #4C1D95; color: #A78BFA; border-radius: 8px; padding: 6px 16px; font-size: 0.85rem; font-weight: 600; }
+    .btn-outline-purple:hover { background: rgba(76, 29, 149, 0.2); }
+    .text-muted-custom { color: #A1A1AA; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h3 text-white fw-bold mb-0">Outbound Deliveries</h1>
+</div>
+
+<div class="panel-card mb-4">
+    <div id="statusMessage" class="alert d-none" role="alert"></div>
+    <form id="deliveryForm">
+        <input type="hidden" id="userId" value="{{ session.get('user_id') }}">
+        <h6 class="text-white fw-bold mb-4">Shipment Details</h6>
+        <div class="row mb-5">
+            <div class="col-md-6 mb-3">
+                <label class="form-label text-muted-custom">Source Warehouse</label>
+                <select id="warehouseId" class="form-select dark-input" required>
+                    <option value="" disabled selected>Select Origin...</option>
+                    {% for warehouse in warehouses %}<option value="{{ warehouse.id }}">{{ warehouse.name }}</option>{% endfor %}
+                </select>
+            </div>
+            <div class="col-md-6 mb-3">
+                <label class="form-label text-muted-custom">Customer Destination</label>
+                <select id="customerId" class="form-select dark-input" required>
+                    <option value="" disabled selected>Select Customer...</option>
+                    {% for customer in customers %}<option value="{{ customer.id }}">{{ customer.name }}</option>{% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="text-white fw-bold mb-0">Items to Ship</h6>
+            <button type="button" class="btn-outline-purple" onclick="addRow()">+ Add Line Item</button>
+        </div>
+
+        <table class="custom-table mb-4" id="itemsTable">
+            <thead><tr><th width="60%">Product</th><th width="30%">Quantity to Ship</th><th width="10%" class="text-end">Action</th></tr></thead>
+            <tbody id="itemsBody"></tbody>
+        </table>
+
+        <div class="d-flex justify-content-end mt-4 pt-4" style="border-top: 1px solid #3F3F46;">
+            <button type="button" class="btn-purple" onclick="submitDelivery()">Validate Delivery</button>
+        </div>
+    </form>
+</div>
+
+<template id="productOptionsTemplate">
+    <option value="" disabled selected>Select Product...</option>
+    {% for product in products %}<option value="{{ product.id }}">[{{ product.sku }}] {{ product.name }}</option>{% endfor %}
+</template>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => addRow());
+    function addRow() {
+        const tbody = document.getElementById('itemsBody');
+        const tr = document.createElement('tr');
+        tr.className = 'item-row';
+        tr.innerHTML = `
+            <td class="pe-3"><select class="form-select dark-input product-select" required>${document.getElementById('productOptionsTemplate').innerHTML}</select></td>
+            <td class="pe-3"><input type="number" step="0.01" min="0.01" class="form-control dark-input quantity-input" placeholder="0.00" required></td>
+            <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger" style="border-radius: 6px;" onclick="this.closest('tr').remove()">X</button></td>
+        `;
+        tbody.appendChild(tr);
+    }
+    
+    async function submitDelivery() {
+        const warehouseId = document.getElementById('warehouseId').value;
+        const customerId = document.getElementById('customerId').value;
+        const items = [];
+        let hasError = false;
+
+        document.querySelectorAll('.item-row').forEach(row => {
+            const productId = row.querySelector('.product-select').value;
+            const qty = row.querySelector('.quantity-input').value;
+            if (!productId || !qty || qty <= 0) hasError = true;
+            else items.push({ product_id: parseInt(productId), quantity: parseFloat(qty) });
+        });
+
+        if (hasError || items.length === 0 || !warehouseId || !customerId) {
+            showStatus('Please complete all fields.', 'warning'); return;
+        }
+
+        try {
+            const response = await fetch('/api/deliveries', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ warehouse_id: parseInt(warehouseId), customer_id: parseInt(customerId), user_id: parseInt(document.getElementById('userId').value), items: items })
+            });
+            const result = await response.json();
+            if (response.ok) {
+                showStatus('Delivery Validated!', 'success');
+                document.getElementById('deliveryForm').reset();
+                document.getElementById('itemsBody').innerHTML = '';
+                addRow();
+            } else showStatus(result.message, 'danger');
+        } catch (e) { showStatus('Network error.', 'danger'); }
+    }
+
+    function showStatus(msg, type) {
+        const box = document.getElementById('statusMessage');
+        box.style.cssText = type === 'success' ? "background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.3); color: #6EE7B7;" : "background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.3); color: #FCA5A5;";
+        box.className = `alert`; box.textContent = msg; box.classList.remove('d-none');
+        setTimeout(() => box.classList.add('d-none'), 5000);
+    }
+</script>
+{% endblock %}

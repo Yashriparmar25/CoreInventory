@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .panel-card { background-color: #27272A; border: 1px solid #3F3F46; border-radius: 12px; padding: 24px; }
+    .dark-input { background-color: #18181B; border: 1px solid #3F3F46; color: #F4F4F5; border-radius: 8px; padding: 10px 14px; transition: all 0.2s; }
+    .dark-input:focus { border-color: #A78BFA; box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2); outline: none; }
+    .custom-table { width: 100%; color: #F4F4F5; font-size: 0.9rem; }
+    .custom-table th { color: #A1A1AA; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; border-bottom: 1px solid #3F3F46; padding-bottom: 12px; font-weight: 600; }
+    .custom-table td { padding: 16px 0; border-bottom: 1px solid #3F3F46; vertical-align: middle; }
+    .btn-purple { background-color: #6D28D9; color: white; border: none; border-radius: 8px; padding: 10px 24px; font-weight: 600; transition: all 0.2s; }
+    .btn-purple:hover { background-color: #5B21B6; }
+    .text-muted-custom { color: #A1A1AA; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h3 text-white fw-bold mb-0">Products Catalog</h1>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-4">
+        <div class="panel-card h-100">
+            <h6 class="text-white fw-bold mb-4">Register New Product</h6>
+            <form method="POST" action="/products">
+                <div class="mb-3">
+                    <label class="form-label text-muted-custom">Product Name</label>
+                    <input type="text" name="name" class="form-control dark-input" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-muted-custom">SKU / Barcode</label>
+                    <input type="text" name="sku" class="form-control dark-input" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-muted-custom">Category</label>
+                    <select name="category_id" class="form-select dark-input" required>
+                        {% for cat in categories %}<option value="{{ cat.id }}">{{ cat.name }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-muted-custom">Unit of Measure</label>
+                    <input type="text" name="uom" class="form-control dark-input" required placeholder="e.g. kg, pcs">
+                </div>
+                
+                <div class="row g-2 mb-4">
+                    <div class="col-6">
+                        <label class="form-label text-muted-custom">Cost Price ($)</label>
+                        <input type="number" step="0.01" name="cost_price" class="form-control dark-input" required placeholder="0.00">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-muted-custom">Sale Price ($)</label>
+                        <input type="number" step="0.01" name="sale_price" class="form-control dark-input" required placeholder="0.00">
+                    </div>
+                </div>
+
+                <button type="submit" class="btn-purple w-100">+ Add Product</button>
+            </form>
+        </div>
+    </div>
+    <div class="col-lg-8">
+        <div class="panel-card h-100">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h6 class="text-white fw-bold mb-0">Catalog Overview</h6>
+                {% if is_filtered %}
+                    <a href="/products" class="btn btn-sm btn-outline-secondary" style="font-size: 0.75rem; border-radius: 6px; border-color: #3F3F46; color: #A1A1AA;">✕ Clear Filter</a>
+                {% endif %}
+            </div>
+            <div class="table-responsive">
+                <table class="custom-table">
+                    <thead>
+                        <tr>
+                            <th>SKU</th>
+                            <th>Product Name</th>
+                            <th>Category</th>
+                            <th>Cost</th>
+                            <th>Sale</th>
+                            <th class="text-end">UoM</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in products %}
+                        <tr {% if is_filtered %}style="background-color: rgba(248, 113, 113, 0.05);"{% endif %}>
+                            <td class="text-muted-custom">{{ p.sku }}</td>
+                            <td class="fw-bold text-white">{{ p.name }}</td>
+                            <td>{{ p.category_name }}</td>
+                            <td style="color: #6EE7B7;">${{ "{:,.2f}".format(p.cost_price) }}</td>
+                            <td style="color: #FDBA74;">${{ "{:,.2f}".format(p.sale_price) }}</td>
+                            
+                            <td class="text-end">{{ p.unit_of_measure }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="6" class="text-center text-muted py-4">No products found.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
