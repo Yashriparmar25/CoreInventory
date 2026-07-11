@@ -1,0 +1,520 @@
+import os
+import random
+from functools import wraps
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+from sqlalchemy import func, cast, Date
+
+app = Flask(__name__)
+app.secret_key = 'super_secret_hackathon_key' 
+# Phase 1: Dynamic Database URI for Neon Postgres (Falls back to SQLite locally)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///inventory.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+# ==========================================
+# MODELS 
+# ==========================================
+
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    role = db.Column(db.String(20), nullable=False, default='Manager')
+    address = db.Column(db.Text, nullable=True)
+    preferred_payment = db.Column(db.String(20), nullable=True, default='UPI')
+    reset_otp = db.Column(db.String(6), nullable=True)
+    otp_expiry = db.Column(db.DateTime, nullable=True)
+
+class Location(db.Model):
+    __tablename__ = 'locations'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    type = db.Column(db.String(50), nullable=False)
+
+class ProductCategory(db.Model):
+    __tablename__ = 'product_categories'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+
+class Product(db.Model):
+    __tablename__ = 'products'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    sku = db.Column(db.String(100), unique=True, nullable=False)
+    category_id = db.Column(db.Integer, db.ForeignKey('product_categories.id'))
+    unit_of_measure = db.Column(db.String(50), nullable=False)
+    # Phase 3: Added Financial Metrics
+    cost_price = db.Column(db.Float, nullable=False, default=0.0)
+    sale_price = db.Column(db.Float, nullable=False, default=0.0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class InventoryOperation(db.Model):
+    __tablename__ = 'inventory_operations'
+    id = db.Column(db.Integer, primary_key=True)
+    document_type = db.Column(db.String(50), nullable=False)
+    status = db.Column(db.String(50), nullable=False)
+    source_location_id = db.Column(db.Integer, db.ForeignKey('locations.id'))
+    dest_location_id = db.Column(db.Integer, db.ForeignKey('locations.id'))
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class OperationLine(db.Model):
+    __tablename__ = 'operation_lines'
+    id = db.Column(db.Integer, primary_key=True)
+    operation_id = db.Column(db.Integer, db.ForeignKey('inventory_operations.id', ondelete="CASCADE"))
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'))
+    quantity = db.Column(db.Float, nullable=False)
+
+class StockLedger(db.Model):
+    __tablename__ = 'stock_ledger'
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'))
+    location_id = db.Column(db.Integer, db.ForeignKey('locations.id'))
+    operation_id = db.Column(db.Integer, db.ForeignKey('inventory_operations.id'))
+    quantity_change = db.Column(db.Float, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+class AuditLog(db.Model):
+    __tablename__ = 'audit_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    action = db.Column(db.String(100), nullable=False)
+    details = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship('User', backref='logs')
+
+# ==========================================
+# AUTO-SEEDING & TABLE CREATION
+# ==========================================
+with app.app_context():
+    db.create_all()
+    
+    # Auto-Seed Logic: If there are no users, inject the demo data instantly!
+    if not User.query.first():
+        print("Empty database detected. Auto-seeding demo data...")
+        
+        # 1. Create Users & Locations
+        admin = User(username="Admin Manager", email="admin@test.com", password_hash=generate_password_hash("password", method='pbkdf2:sha256'), role="Manager")
+        staff = User(username="Warehouse Staff", email="staff@test.com", password_hash=generate_password_hash("password", method='pbkdf2:sha256'), role="Warehouse_Staff")
+        
+        vendor = Location(name="Steel Supplier Inc.", type="Vendor")
+        warehouse = Location(name="Main Warehouse", type="Internal")
+        customer = Location(name="Acme Manufacturing", type="Customer")
+        adj_loc = Location(name="Virtual Adjustment Log", type="Inventory Loss")
+        cat = ProductCategory(name="Raw Materials")
+        
+        db.session.add_all([admin, staff, vendor, warehouse, customer, adj_loc, cat])
+        db.session.flush() # Flush to get IDs
+        
+        # 2. Inject Products with Financial Valuation Data
+        p1 = Product(name="Steel Rods", sku="SR-001", category_id=cat.id, unit_of_measure="kg", cost_price=2.50, sale_price=4.00)
+        p2 = Product(name="Copper Wire", sku="SKU-014", category_id=cat.id, unit_of_measure="kg", cost_price=8.50, sale_price=12.00)
+        p3 = Product(name="Safety Gloves", sku="SKU-031", category_id=cat.id, unit_of_measure="pairs", cost_price=2.00, sale_price=4.50)
+        p4 = Product(name="PVC Pipe 2in", sku="SKU-022", category_id=cat.id, unit_of_measure="m", cost_price=1.20, sale_price=3.00)
+        db.session.add_all([p1, p2, p3, p4])
+        db.session.flush()
+
+        # 3. Inject a "Pending" Receipt
+        pending_rec = InventoryOperation(document_type='Receipt', status='Waiting', source_location_id=vendor.id, dest_location_id=warehouse.id, created_by=admin.id)
+        db.session.add(pending_rec)
+        db.session.flush()
+        db.session.add(OperationLine(operation_id=pending_rec.id, product_id=p2.id, quantity=150))
+
+        # 4. Inject an "Overdue" Delivery
+        overdue_del = InventoryOperation(document_type='Delivery', status='Overdue', source_location_id=warehouse.id, dest_location_id=customer.id, created_by=admin.id)
+        overdue_del.created_at = datetime.utcnow() - timedelta(days=2) # Backdate it
+        db.session.add(overdue_del)
+        db.session.flush()
+        db.session.add(OperationLine(operation_id=overdue_del.id, product_id=p3.id, quantity=25))
+
+        db.session.commit()
+        print("Demo data and Hackathon Pitch operations successfully injected!")
+
+# ==========================================
+# HELPERS & CONTEXT PROCESSORS
+# ==========================================
+def log_action(user_id, action, details=""):
+    new_log = AuditLog(user_id=user_id, action=action, details=details)
+    db.session.add(new_log)
+    db.session.commit()
+
+@app.context_processor
+def inject_global_data():
+    if 'user_id' in session:
+        nav_pending = InventoryOperation.query.filter(InventoryOperation.status != 'Done').order_by(InventoryOperation.created_at.desc()).limit(4).all()
+        nav_completed = InventoryOperation.query.filter_by(status='Done').order_by(InventoryOperation.created_at.desc()).limit(4).all()
+        return dict(nav_pending=nav_pending, nav_completed=nav_completed)
+    return dict()
+
+# ==========================================
+# AUTHENTICATION & RBAC MIDDLEWARE
+# ==========================================
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session: return redirect(url_for('login'))
+        user = User.query.get(session['user_id'])
+        if not user:
+            session.clear()
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def role_required(allowed_role):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if session.get('user_role') != allowed_role:
+                flash(f'Access Denied: Requires {allowed_role} clearance.', 'danger')
+                return redirect(url_for('dashboard'))
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+# ==========================================
+# ROUTES
+# ==========================================
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        name = request.form.get('name')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        role = request.form.get('role', 'Manager')
+        if User.query.filter_by(email=email).first():
+            flash('Email already exists. Please log in.', 'danger')
+            return redirect(url_for('signup'))
+        hashed_pw = generate_password_hash(password, method='pbkdf2:sha256')
+        new_user = User(username=name, email=email, password_hash=hashed_pw, role=role)
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect(url_for('login'))
+    return render_template('signup.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        user = User.query.filter_by(email=email).first()
+        if user and check_password_hash(user.password_hash, password):
+            session['user_id'] = user.id
+            session['user_name'] = user.username
+            session['user_role'] = user.role
+            log_action(user.id, "System Login", f"Authenticated successfully via {email}")
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid email or password.', 'danger')
+            return redirect(url_for('login'))
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    if 'user_id' in session:
+        log_action(session['user_id'], "System Logout", "User ended session manually.")
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        user = User.query.filter_by(email=email).first()
+        if user:
+            otp = str(random.randint(100000, 999999))
+            user.reset_otp = otp
+            user.otp_expiry = datetime.utcnow() + timedelta(minutes=10)
+            db.session.commit()
+            print(f"\n========== 📧 DEMO OTP: {otp} ==========\n")
+            flash(f'Demo Mode: An OTP ({otp}) has been sent to your email.', 'info')
+            session['reset_email'] = email
+            return redirect(url_for('verify_otp'))
+        else:
+            flash('If that email is registered, an OTP has been sent.', 'info')
+            return redirect(url_for('forgot_password'))
+    return render_template('forgot_password.html')
+
+@app.route('/verify-otp', methods=['GET', 'POST'])
+def verify_otp():
+    if 'reset_email' not in session: return redirect(url_for('forgot_password'))
+    if request.method == 'POST':
+        otp_entered = request.form.get('otp')
+        user = User.query.filter_by(email=session['reset_email']).first()
+        if user and user.reset_otp == otp_entered:
+            if datetime.utcnow() > user.otp_expiry:
+                flash('OTP has expired. Please request a new one.', 'danger')
+                return redirect(url_for('forgot_password'))
+            session['otp_verified'] = True
+            return redirect(url_for('reset_password'))
+        else:
+            flash('Invalid OTP. Please check your email and try again.', 'danger')
+            return redirect(url_for('verify_otp'))
+    return render_template('verify_otp.html')
+
+@app.route('/reset-password', methods=['GET', 'POST'])
+def reset_password():
+    if not session.get('otp_verified') or 'reset_email' not in session: return redirect(url_for('login'))
+    if request.method == 'POST':
+        new_password = request.form.get('password')
+        user = User.query.filter_by(email=session['reset_email']).first()
+        if user:
+            user.password_hash = generate_password_hash(new_password, method='pbkdf2:sha256')
+            user.reset_otp = None
+            user.otp_expiry = None
+            db.session.commit()
+            log_action(user.id, "Password Recovered", "User reset password via OTP verification.")
+            session.pop('reset_email', None)
+            session.pop('otp_verified', None)
+            flash('Password reset successfully! You can now log in.', 'success')
+            return redirect(url_for('login'))
+        else:
+            flash('An error occurred during password reset.', 'danger')
+            return redirect(url_for('forgot_password'))
+    return render_template('reset_password.html')
+
+@app.route('/')
+def index():
+    return redirect(url_for('dashboard'))
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    total_products = Product.query.count()
+    pending_receipts = InventoryOperation.query.filter_by(document_type='Receipt').filter(InventoryOperation.status != 'Done').count()
+    pending_deliveries = InventoryOperation.query.filter_by(document_type='Delivery').filter(InventoryOperation.status != 'Done').count()
+    total_completed = InventoryOperation.query.filter_by(status='Done').count()
+    
+    # Phase 1: Optimized Low Stock Query (Offloads work to the database)
+    low_stock_query = db.session.query(
+        Product, 
+        func.sum(StockLedger.quantity_change).label('total_stock')
+    ).join(StockLedger, Product.id == StockLedger.product_id)\
+     .group_by(Product.id)\
+     .having(func.sum(StockLedger.quantity_change) <= 10).all()
+
+    low_stock_items = [{'product': item[0], 'qty': item[1]} for item in low_stock_query]
+    low_stock_items.sort(key=lambda x: x['qty'])
+    low_stock_count = len(low_stock_items)
+
+    # Phase 3: Total Asset Value Calculation (Database level)
+    total_asset_value = db.session.query(
+        func.sum(StockLedger.quantity_change * Product.cost_price)
+    ).join(Product, StockLedger.product_id == Product.id).scalar() or 0.0
+
+    recent_ops = InventoryOperation.query.order_by(InventoryOperation.created_at.desc()).limit(8).all()
+    loc_map = {loc.id: loc.name for loc in Location.query.all()}
+
+    # Phase 2: Visual Analytics (Last 7 Days)
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    daily_ops = db.session.query(
+        cast(InventoryOperation.created_at, Date).label('date'),
+        InventoryOperation.document_type,
+        func.count(InventoryOperation.id).label('count')
+    ).filter(InventoryOperation.created_at >= seven_days_ago)\
+     .group_by(cast(InventoryOperation.created_at, Date), InventoryOperation.document_type).all()
+
+    chart_labels = sorted(list(set([str(op.date) for op in daily_ops])))
+    chart_data_receipts = [next((op.count for op in daily_ops if str(op.date) == d and op.document_type == 'Receipt'), 0) for d in chart_labels]
+    chart_data_deliveries = [next((op.count for op in daily_ops if str(op.date) == d and op.document_type == 'Delivery'), 0) for d in chart_labels]
+
+    return render_template('dashboard.html', 
+                           total_products=total_products, 
+                           pending_receipts=pending_receipts, 
+                           pending_deliveries=pending_deliveries, 
+                           total_completed=total_completed, 
+                           low_stock=low_stock_count, 
+                           low_stock_items=low_stock_items[:5], 
+                           recent_ops=recent_ops, 
+                           loc_map=loc_map,
+                           total_asset_value=total_asset_value,
+                           chart_labels=chart_labels,
+                           chart_data_receipts=chart_data_receipts,
+                           chart_data_deliveries=chart_data_deliveries)
+
+@app.route('/products', methods=['GET', 'POST'])
+@login_required
+@role_required('Manager') 
+def products():
+    if request.method == 'POST':
+        name = request.form.get('name')
+        sku = request.form.get('sku')
+        category_id = request.form.get('category_id')
+        uom = request.form.get('uom')
+        cost_price = float(request.form.get('cost_price', 0.0))
+        sale_price = float(request.form.get('sale_price', 0.0))
+        
+        existing_product = Product.query.filter((Product.sku == sku) | (func.lower(Product.name) == name.lower())).first()
+        if existing_product:
+            flash(f'Error: A product with the name "{name}" or SKU "{sku}" is already in the catalog!', 'danger')
+            return redirect(url_for('products', duplicate_id=existing_product.id))
+            
+        new_product = Product(name=name, sku=sku, category_id=category_id, unit_of_measure=uom, cost_price=cost_price, sale_price=sale_price)
+        db.session.add(new_product)
+        db.session.commit()
+        log_action(session['user_id'], "Product Created", f"Added '{name}' (SKU: {sku}) to catalog.")
+        flash(f'Success: Product "{name}" added.', 'success')
+        return redirect(url_for('products'))
+        
+    duplicate_id = request.args.get('duplicate_id')
+    base_query = db.session.query(Product.id, Product.name, Product.sku, Product.unit_of_measure, Product.cost_price, Product.sale_price, ProductCategory.name.label('category_name')).outerjoin(ProductCategory, Product.category_id == ProductCategory.id)
+    
+    if duplicate_id:
+        products_list = base_query.filter(Product.id == duplicate_id).all()
+    else:
+        products_list = base_query.all()
+        
+    categories = ProductCategory.query.all()
+    return render_template('products.html', products=products_list, categories=categories, is_filtered=bool(duplicate_id))
+
+@app.route('/locations', methods=['GET', 'POST'])
+@login_required
+@role_required('Manager')
+def locations():
+    if request.method == 'POST':
+        name = request.form.get('name')
+        loc_type = request.form.get('type')
+        
+        existing_loc = Location.query.filter(func.lower(Location.name) == name.lower()).first()
+        if existing_loc:
+            flash(f'Error: A location or partner named "{name}" is already registered!', 'danger')
+            return redirect(url_for('locations', duplicate_id=existing_loc.id))
+            
+        new_loc = Location(name=name, type=loc_type)
+        db.session.add(new_loc)
+        db.session.commit()
+        log_action(session['user_id'], "Location Created", f"Added new {loc_type}: '{name}'.")
+        flash(f'Success: {loc_type} "{name}" added to network.', 'success')
+        return redirect(url_for('locations'))
+    
+    duplicate_id = request.args.get('duplicate_id')
+    if duplicate_id:
+        locations_list = Location.query.filter_by(id=duplicate_id).all()
+    else:
+        locations_list = Location.query.all()
+        
+    return render_template('locations.html', locations=locations_list, is_filtered=bool(duplicate_id))
+
+@app.route('/receipts')
+@login_required
+def receipts():
+    vendors = Location.query.filter_by(type='Vendor').all()
+    warehouses = Location.query.filter_by(type='Internal').all()
+    products = Product.query.all()
+    return render_template('receipts.html', vendors=vendors, warehouses=warehouses, products=products)
+
+@app.route('/deliveries')
+@login_required
+def deliveries():
+    customers = Location.query.filter_by(type='Customer').all()
+    warehouses = Location.query.filter_by(type='Internal').all()
+    products = Product.query.all()
+    return render_template('deliveries.html', customers=customers, warehouses=warehouses, products=products)
+
+@app.route('/adjustments')
+@login_required
+def adjustments():
+    warehouses = Location.query.filter_by(type='Internal').all()
+    products = Product.query.all()
+    return render_template('adjustments.html', warehouses=warehouses, products=products)
+
+@app.route('/profile', methods=['GET', 'POST'])
+@login_required
+def profile():
+    user = User.query.get(session['user_id'])
+    if request.method == 'POST':
+        user.username = request.form.get('name')
+        user.email = request.form.get('email')
+        new_pwd = request.form.get('password')
+        if new_pwd: user.password_hash = generate_password_hash(new_pwd, method='pbkdf2:sha256')
+        user.address = request.form.get('address')
+        user.preferred_payment = request.form.get('preferred_payment')
+        db.session.commit()
+        session['user_name'] = user.username
+        log_action(session['user_id'], "Profile Updated", "User updated personal or billing details.")
+        flash('Profile updated.', 'success')
+        return redirect(url_for('profile'))
+    return render_template('profile.html', user=user)
+
+@app.route('/audit')
+@login_required
+@role_required('Manager')
+def audit_logs():
+    logs = AuditLog.query.order_by(AuditLog.timestamp.desc()).limit(100).all()
+    return render_template('audit.html', logs=logs)
+
+# ==========================================
+# GLOBAL ERROR HANDLING (UI PRESERVED)
+# ==========================================
+@app.errorhandler(404)
+def not_found_error(error):
+    flash("404 Error: The page you are looking for does not exist.", "warning")
+    return redirect(url_for('dashboard'))
+
+@app.errorhandler(500)
+def internal_error(error):
+    db.session.rollback() 
+    flash("500 Error: An internal server error occurred. Please try again later.", "danger")
+    return redirect(url_for('dashboard'))
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    db.session.rollback() 
+    if request.path.startswith('/api/'):
+        return jsonify({"message": "A system error occurred. Please check your inputs."}), 500
+    flash("System Alert: An unexpected error was safely caught and resolved.", "danger")
+    return redirect(url_for('dashboard'))
+
+# ==========================================
+# API ENDPOINTS 
+# ==========================================
+@app.route('/api/receipts', methods=['POST'])
+def process_receipt():
+    data = request.get_json()
+    op = InventoryOperation(document_type='Receipt', status='Done', source_location_id=data['vendor_id'], dest_location_id=data['warehouse_id'], created_by=data['user_id'])
+    db.session.add(op)
+    db.session.flush() 
+    for item in data['items']:
+        db.session.add(OperationLine(operation_id=op.id, product_id=item['product_id'], quantity=item['quantity']))
+        db.session.add(StockLedger(product_id=item['product_id'], location_id=data['warehouse_id'], operation_id=op.id, quantity_change=item['quantity']))
+    db.session.commit()
+    log_action(data['user_id'], "Receipt Processed", f"Processed REC-{op.id} at warehouse ID {data['warehouse_id']}.")
+    return jsonify({"message": "Receipt validated!"}), 201
+
+@app.route('/api/deliveries', methods=['POST'])
+def process_delivery():
+    data = request.get_json()
+    op = InventoryOperation(document_type='Delivery', status='Done', source_location_id=data['warehouse_id'], dest_location_id=data['customer_id'], created_by=data['user_id'])
+    db.session.add(op)
+    db.session.flush()
+    for item in data['items']:
+        db.session.add(OperationLine(operation_id=op.id, product_id=item['product_id'], quantity=item['quantity']))
+        db.session.add(StockLedger(product_id=item['product_id'], location_id=data['warehouse_id'], operation_id=op.id, quantity_change=-float(item['quantity'])))
+    db.session.commit()
+    log_action(data['user_id'], "Delivery Processed", f"Processed DEL-{op.id} to customer ID {data['customer_id']}.")
+    return jsonify({"message": "Delivery validated!"}), 201
+
+@app.route('/api/adjustments', methods=['POST'])
+def process_adjustment():
+    data = request.get_json()
+    product_id, warehouse_id, counted_qty = int(data['product_id']), int(data['warehouse_id']), float(data['counted_quantity'])
+    current_stock = db.session.query(func.sum(StockLedger.quantity_change)).filter_by(product_id=product_id, location_id=warehouse_id).scalar() or 0.0
+    diff = counted_qty - current_stock
+    if diff == 0: return jsonify({"message": "No adjustment needed."}), 200
+    adj_loc = Location.query.filter_by(type='Inventory Loss').first()
+    op = InventoryOperation(document_type='Adjustment', status='Done', source_location_id=warehouse_id if diff < 0 else adj_loc.id, dest_location_id=adj_loc.id if diff < 0 else warehouse_id, created_by=data['user_id'])
+    db.session.add(op)
+    db.session.flush()
+    db.session.add(OperationLine(operation_id=op.id, product_id=product_id, quantity=abs(diff)))
+    db.session.add(StockLedger(product_id=product_id, location_id=warehouse_id, operation_id=op.id, quantity_change=diff))
+    db.session.commit()
+    log_action(data['user_id'], "Stock Adjusted", f"Adjusted ADJ-{op.id} for Product {product_id} by {diff} units.")
+    return jsonify({"message": "Adjustment successful."}), 201
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', debug=True, port=5000)
